@@ -1,0 +1,8 @@
+# Built and copied by scripts/vendor-zonos3.sh (the ZONOS3 engine and its ~1.6 GB of model files)
+/vendor/zonos3/
+/models/
+# Local tooling
+/.claude/
+node_modules/
+.DS_Store
+*.log

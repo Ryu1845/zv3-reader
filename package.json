@@ -1,0 +1,11 @@
+{
+  "name": "zv3-reader-ext",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "ZV3 Reader browser extension (no build step; this file only configures node --test).",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "smoke": "node scripts/smoke.mjs"
+  }
+}

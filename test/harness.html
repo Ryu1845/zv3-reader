@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ZV3 extraction harness</title>
+<style>
+  body { font: 13px/1.4 system-ui, sans-serif; margin: 16px; }
+  iframe { width: 600px; height: 300px; border: 1px solid #ccc; }
+  pre { white-space: pre-wrap; background: #f4f4f4; padding: 8px; }
+  .fail { color: #c0392b; } .pass { color: #1f8a4c; }
+</style>
+<script src="../vendor/Readability.js"></script>
+<script src="../vendor/Readability-readerable.js"></script>
+</head>
+<body>
+<h1>Extraction harness</h1>
+<div id="summary">running…</div>
+<pre id="results"></pre>
+<iframe id="frame"></iframe>
+<script type="module">
+import {extractArticle, extractSelection, blockRange} from '../content/extract.js';
+import {splitSentences} from '../shared/segment.js';
+import {buildChunks} from '../shared/chunker.js';
+
+const out = [];
+let failures = 0;
+const check = (name, ok, detail = '') => { out.push(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ' — ' + detail : ''}`); if (!ok) failures++; };
+const norm = s => s.replace(/[­​]/g, '').replace(/\s+/g, ' ').trim();
+
+function load(src) {
+  return new Promise(res => { const f = document.getElementById('frame'); f.onload = () => res(f.contentDocument); f.src = src; });
+}
+
+function sentencesWithRanges(doc, ex) {
+  const blocks = ex.blocks.map((b, bi) => ({heading: b.heading, sents: splitSentences(b.text, 'en_us').map(sp => ({
+    text: b.text.slice(sp.start, sp.end), ref: {b: bi, start: sp.start, end: sp.end}}))}));
+  const rangeText = ref => {
+    const sr = blockRange(ex.blocks[ref.b], ref.start, ref.end);
+    if (!sr) return null;
+    const r = doc.createRange(); r.setStart(sr.startContainer, sr.startOffset); r.setEnd(sr.endContainer, sr.endOffset);
+    return r.toString();
+  };
+  return {blocks, rangeText};
+}
+
+// ---- article fixture
+{
+  const doc = await load('fixtures/article.html');
+  const ex = extractArticle(doc, {Readability, isProbablyReaderable});
+  const all = ex.blocks.map(b => b.text).join('\n');
+  out.push(`source=${ex.source} title=${JSON.stringify(ex.title)} blocks=${ex.blocks.length}`);
+  check('uses Readability with identity mapping', ex.source === 'readability', ex.source);
+  check('skips nav', !all.includes('Technology menu link'));
+  check('skips aside', !all.includes('Sidebar text'));
+  check('skips footer', !all.includes('Copyright footer'));
+  check('skips footnote markers', !all.includes('[1]'));
+  check('skips hidden text', !all.includes('SECRET'));
+  check('br becomes a space', all.includes('line break right here'));
+  check('soft hyphen / zero-width removed', all.includes('extraordinary') && all.includes('Zerowidth'));
+  check('inline elements joined', all.includes('about bold ideas and linked ideas for an hour'));
+  check('headings flagged', ex.blocks.some(b => b.heading && b.text === 'Background'));
+  check('list items are separate blocks', ex.blocks.some(b => b.text === 'First list item with some words in it.'));
+  const {blocks, rangeText} = sentencesWithRanges(doc, ex);
+  let mismatches = 0, total = 0;
+  for (const b of blocks) for (const s of b.sents) {
+    const t = rangeText(s.ref);
+    if (t == null) continue;
+    total++;
+    // Ranges may span skipped text (hidden spans, <br>), so compare the edges of the sentence.
+    const a = norm(t), e = norm(s.text);
+    if (!a.startsWith(e.slice(0, 12)) || !a.endsWith(e.slice(-12))) { mismatches++; out.push(`   range "${a}" != sentence "${e}"`); }
+  }
+  check('every sentence range starts and ends on its text', mismatches === 0 && total > 8, `${total} ranges, ${mismatches} mismatches`);
+  check('abbreviations not split', blocks.some(b => b.sents.some(s => s.text.startsWith('Dr. Smith went to Washington on Monday.'))));
+  const chunks = buildChunks(blocks, {lang: 'en_us'});
+  out.push(`chunks: ${chunks.map(c => `${c.estSec}s/${c.text.length}c`).join(', ')}`);
+  check('first chunk is short', chunks[0].estSec <= 8 || chunks[0].sents.length === 1);
+  out.push('first chunk: ' + chunks[0].text);
+  check('page h1 is spoken and mapped instead of the full document title',
+    ex.blocks[0].text === 'The Test Article' && ex.blocks[0].nodes.length === 1 && ex.blocks[0].heading);
+
+  // selection across two paragraphs, starting mid-sentence
+  const ps = doc.querySelectorAll('article p');
+  const r = doc.createRange();
+  r.setStart(ps[1].firstChild, 4);         // "second paragraph…"
+  r.setEnd(ps[2].firstChild, 4);           // "Soft"
+  const sel = doc.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+  const sx = extractSelection(doc);
+  out.push('selection blocks: ' + JSON.stringify(sx.blocks.map(b => b.text)));
+  check('selection clipped to range', sx.blocks[0]?.text.startsWith('second paragraph') && sx.blocks.at(-1)?.text === 'Soft');
+  check('selection skips hidden text', !sx.blocks.some(b => b.text.includes('SECRET')));
+  const sr = blockRange(sx.blocks[0], 0, 6);
+  check('selection ranges map to DOM', sr && sr.startContainer === ps[1].firstChild && sr.startOffset === 4);
+}
+
+// ---- short fixture (Readability retry / fallback path)
+{
+  const doc = await load('fixtures/short.html');
+  const ex = extractArticle(doc, {Readability, isProbablyReaderable});
+  out.push(`short: source=${ex.source} blocks=${JSON.stringify(ex.blocks.map(b => b.text))}`);
+  check('short page still yields text', ex.blocks.some(b => b.text.includes('only has a little text')));
+  const mapped = ex.blocks.filter(b => b.nodes.length).length;
+  check('short page blocks are mapped to the DOM', mapped >= 1, `${mapped} mapped`);
+}
+
+document.getElementById('results').textContent = out.join('\n');
+document.getElementById('summary').innerHTML = failures ? `<b class="fail">${failures} failed</b>` : '<b class="pass">all passed</b>';
+window.__results = {failures, out};
+</script>
+</body>
+</html>

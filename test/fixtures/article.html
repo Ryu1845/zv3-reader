@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>The Test Article - Example News</title></head>
+<body>
+<header><nav><a href="/">Home</a> <a href="/world">World</a> <a href="/tech">Technology menu link</a></nav></header>
+<main>
+<article>
+  <h1>The Test Article</h1>
+  <p>Dr. Smith went to Washington on Monday.<sup class="reference"><a href="#cite-1">[1]</a></sup> He met the U.S. president at 3 p.m. and they talked about <b>bold</b> ideas and <a href="/x">linked ideas</a> for an hour.</p>
+  <h2>Background</h2>
+  <p>The second paragraph has a line break<br>right here, and continues on the next line. It also contains a hidden span<span style="display:none"> SECRET HIDDEN TEXT</span> that should not be read.</p>
+  <p>Soft&shy;hyphen words like extra&shy;ordinary should read normally. Zero&#8203;width spaces should vanish too.</p>
+  <blockquote><p>A quoted paragraph that is long enough to be counted as content by the extraction step, which matters for scoring.</p></blockquote>
+  <ul><li>First list item with some words in it.</li><li>Second list item with more words in it.</li></ul>
+  <p>Another paragraph follows, describing the history of the subject in considerable detail so that the article clears the character threshold that Readability uses to decide whether it found real content.</p>
+  <p>The final paragraph wraps things up. It has two sentences, and the second one ends the article.</p>
+</article>
+</main>
+<aside><h3>Related</h3><p>Sidebar text that should be skipped by Readability because it is not content at all.</p></aside>
+<footer><p>Copyright footer text that should not be read.</p></footer>
+</body>
+</html>

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ZV3 local engine harness</title>
+<style>body { font: 13px/1.4 system-ui, sans-serif; margin: 16px; } pre { background: #f4f4f4; padding: 8px; white-space: pre-wrap; }</style>
+</head>
+<body>
+<h1>Local engine harness</h1>
+<p>Runs the real ZONOS3 in-browser engine (vendor/zonos3, models/) through <code>localBackend</code>: loads the model,
+generates with the default built-in voice twice (TTFB, RTF), with another built-in voice, and in French, then plays a
+part through the real Engine.
+Serve with <code>node scripts/serve.mjs 8798</code>. Results land in <code>#result[data-done]</code>.</p>
+<button id="run">Run</button>
+<pre id="log"></pre>
+<div id="result"></div>
+<script type="module">
+import {localBackend} from '../backend/zonos.js';
+import {Engine} from '../offscreen/engine.js';
+import {SR} from '../offscreen/stream.js';
+
+const MODELS = new URL('../models/', location.href).href;
+const TEXT = 'The quick brown fox jumps over the lazy dog. Local generation runs entirely on this computer, with no server involved.';
+const logEl = document.getElementById('log');
+const log = (...a) => { logEl.textContent += a.join(' ') + '\n'; console.log(...a); };
+const result = {};
+
+async function timeJob(b, voice, text, language = 'en_us') {
+  const t0 = performance.now();
+  const {jobId} = await b.synthesize({text, voice, language, maxSeconds: 30});
+  let ttfb = null, st;
+  for (;;) {
+    st = await b.status(jobId);
+    if (ttfb == null && st.streamable) ttfb = performance.now() - t0;
+    if (st.state === 'done' || st.state === 'failed') break;
+    await new Promise(r => setTimeout(r, 50));
+  }
+  const total = performance.now() - t0;
+  if (st.state === 'failed') throw new Error(st.error);
+  return {jobId, ttfb: Math.round(ttfb), total: Math.round(total), seconds: +st.seconds.toFixed(2), rtf: +(total / 1000 / st.seconds).toFixed(2), hitMax: st.hitMax};
+}
+
+async function run() {
+  document.getElementById('run').disabled = true;
+  try {
+    log('WebGPU:', !!navigator.gpu);
+    const b = localBackend({modelsUrl: MODELS});
+    b.onProgress(m => { if (m && (!m.includes('%') || m.includes('100%'))) log('progress:', m); });
+    const cfg = await b.config();
+    log('voices:', cfg.voices.map(v => `${v.name} (${v.id})`).join(', '));
+
+    const t0 = performance.now();
+    await b.api();
+    result.loadMs = Math.round(performance.now() - t0);
+    log(`engine ready in ${result.loadMs} ms`);
+
+    result.builtin = await timeJob(b, cfg.default_voice, TEXT);
+    log('built-in voice:', JSON.stringify(result.builtin));
+    result.builtin2 = await timeJob(b, cfg.default_voice, TEXT);
+    log('built-in voice (2nd):', JSON.stringify(result.builtin2));
+    result.other = await timeJob(b, cfg.voices[1].id, 'This part is read by another built-in voice.');
+    log('other built-in voice:', JSON.stringify(result.other));
+    result.french = await timeJob(b, cfg.default_voice, 'Bonjour, ceci est un court essai de lecture en français.', 'fr_fr');
+    log('French:', JSON.stringify(result.french));
+
+    // Play the first built-in job through the real Engine + WSOLA worklet at 1.5x.
+    const engine = new Engine({
+      drained: () => { result.played = true; log('engine drained'); finish(); },
+      chunkError: (c, e) => { result.playError = e.message; log('engine error', e.message); finish(); },
+    });
+    await engine.init();
+    engine.load(1);
+    engine.setSpeed(1.5);
+    engine.attach(0, {jobId: result.builtin.jobId, backend: b});
+    engine.play(0, 0);
+    log(`playing ${result.builtin.seconds} s at 1.5× (AudioContext ${engine.ctx.state})…`);
+    setTimeout(() => { if (!result.played) { result.played = false; log('playback did not drain in time'); finish(); } },
+      (result.builtin.seconds / 1.5 + 8) * 1000);
+  } catch (e) {
+    result.error = e.message;
+    log('ERROR', e.message);
+    finish();
+  }
+}
+
+let finished = false;
+function finish() {
+  if (finished) return;
+  finished = true;
+  const el = document.getElementById('result');
+  el.textContent = JSON.stringify(result);
+  el.dataset.done = '1';
+}
+
+document.getElementById('run').onclick = run;
+if (new URLSearchParams(location.search).has('auto')) run();
+</script>
+</body>
+</html>

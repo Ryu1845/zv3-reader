@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ZV3 engine harness</title>
+<style>body { font: 13px/1.4 system-ui, sans-serif; margin: 16px; } pre { background: #f4f4f4; padding: 8px; white-space: pre-wrap; }</style>
+</head>
+<body>
+<h1>Engine harness</h1>
+<p>Runs the real Engine + AudioWorklet (WSOLA) against a fake backend that streams synthetic "speech" (tone bursts)
+in misaligned byte chunks at 2.5× realtime. Click a button (audio needs a user gesture).</p>
+<button id="run1">Play 3 chunks at 1×</button>
+<button id="run2">Play at 2×</button>
+<button id="run3">Seek test</button>
+<pre id="log"></pre>
+<script type="module">
+import {Engine} from '../offscreen/engine.js';
+import {SR, wavHeader, f32ToI16} from '../offscreen/stream.js';
+
+const log = (...a) => { document.getElementById('log').textContent += a.join(' ') + '\n'; };
+const DUR = [3, 4, 3];
+
+function synth(i) {
+  const n = Math.round(DUR[i] * SR), x = new Float32Array(n);
+  let ph = 0;
+  for (let k = 0; k < n; k++) {
+    const t = k / SR;
+    ph += 2 * Math.PI * (140 + 30 * i) / SR;
+    x[k] = (t % 1.05) < 0.8 ? 0.2 * (Math.sin(ph) + 0.4 * Math.sin(2 * ph)) : 0;
+  }
+  return x;
+}
+
+class FakeBackend {
+  constructor() { this.jobs = new Map(); }
+  add(i) { const id = 'job' + i + '-' + Math.random().toString(36).slice(2, 6); this.jobs.set(id, {i, x: synth(i), t0: performance.now(), done: false}); return id; }
+  async status(id) {
+    const j = this.jobs.get(id);
+    const el = (performance.now() - j.t0) / 1000;
+    return {state: j.done ? 'done' : el > 0.3 ? 'streaming' : 'queued', streamable: el > 0.3, seconds: j.x.length / SR, hitMax: false};
+  }
+  liveUrl(id) { return 'live:' + id; }
+  wavUrl(id) { return 'wav:' + id; }
+  async fetch(url, init = {}) {
+    const id = url.slice(5), j = this.jobs.get(id);
+    if (url.startsWith('wav:')) {
+      const i16 = f32ToI16(j.x);
+      return new Response(new Blob([wavHeader(i16.length), i16]));
+    }
+    const bytes = new Uint8Array(j.x.buffer);
+    let off = 0;
+    const step = 1234 * 4 + 3;                 // not a multiple of 4
+    const bytesPerMs = SR * 4 * 2.5 / 1000;    // 2.5x realtime
+    const body = new ReadableStream({
+      pull: async ctrl => {
+        if (init.signal?.aborted) { ctrl.error(new DOMException('aborted', 'AbortError')); return; }
+        if (off >= bytes.length) { j.done = true; ctrl.close(); return; }
+        await new Promise(r => setTimeout(r, step / bytesPerMs));
+        ctrl.enqueue(bytes.slice(off, off + step));
+        off += step;
+      },
+    });
+    return new Response(body, {status: 200});
+  }
+}
+
+async function setup(events) {
+  const t0 = performance.now();
+  const ts = () => ((performance.now() - t0) / 1000).toFixed(2);
+  const engine = new Engine({
+    pos: p => { events.pos.push({t: +ts(), ...p}); },
+    chunkStart: c => { events.log.push(`${ts()}s chunkStart ${c}`); },
+    chunkFinal: (c, info) => events.log.push(`${ts()}s final ${c} (${info.seconds.toFixed(2)}s)`),
+    chunkError: (c, e) => events.log.push(`${ts()}s ERROR ${c}: ${e.message}`),
+    underrun: () => events.log.push(`${ts()}s underrun`),
+    resumed: () => { events.log.push(`${ts()}s resumed`); events.firstAudio ??= +ts(); },
+    drained: () => { events.log.push(`${ts()}s drained`); events.drained = +ts(); events.done?.(); },
+  });
+  await engine.init();
+  // measure what actually reaches the speakers
+  const an = engine.ctx.createAnalyser(); an.fftSize = 2048; engine.node.connect(an);
+  const buf = new Float32Array(2048);
+  events.rms = [];
+  events.meter = setInterval(() => { an.getFloatTimeDomainData(buf); let s = 0; for (const v of buf) s += v * v; events.rms.push(Math.sqrt(s / buf.length)); }, 100);
+  const backend = new FakeBackend();
+  engine.load(DUR.length);
+  for (let i = 0; i < DUR.length; i++) engine.attach(i, {jobId: backend.add(i), backend});
+  return {engine, ts};
+}
+
+async function run(speed) {
+  const events = {pos: [], log: []};
+  const done = new Promise(r => { events.done = r; });
+  const {engine} = await setup(events);
+  engine.setSpeed(speed);
+  engine.play(0, 0);
+  await Promise.race([done, new Promise(r => setTimeout(r, 20000))]);
+  clearInterval(events.meter);
+  const audible = events.rms.filter(v => v > 0.01).length / events.rms.length;
+  const mono = events.pos.every((p, i, a) => !i || p.chunk > a[i - 1].chunk || (p.chunk === a[i - 1].chunk && p.sample >= a[i - 1].sample));
+  const res = {speed, firstAudio: events.firstAudio, drained: events.drained, expected: DUR.reduce((a, b) => a + b) / speed,
+    posReports: events.pos.length, positionsMonotonic: mono, audibleFraction: +audible.toFixed(2), log: events.log};
+  engine.ctx.close();
+  log(JSON.stringify(res, null, 1));
+  return res;
+}
+
+async function seekTest() {
+  const events = {pos: [], log: []};
+  const {engine} = await setup(events);
+  engine.play(0, 0);
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  await wait(5500);                                   // ~4.8 s played -> ~1.8 s into chunk 1
+  const before = {...engine.pos};
+  engine.seek(-10);
+  const afterBack = {...engine.pos};
+  await wait(1500);
+  const playingAfterBack = {...engine.pos};
+  engine.seek(10);
+  const afterFwd = {...engine.pos};
+  await wait(1000);
+  engine.pause();
+  const pausedAt = {...engine.pos};
+  await wait(800);
+  const stillPaused = {...engine.pos};
+  engine.seek(-2);
+  const seekWhilePaused = {...engine.pos};
+  engine.resume();
+  await wait(800);
+  const resumed = {...engine.pos};
+  clearInterval(events.meter);
+  engine.stop();
+  engine.ctx.close();
+  const res = {before, afterBack, playingAfterBack, afterFwd, pausedAt, stillPaused, seekWhilePaused, resumed, log: events.log};
+  log(JSON.stringify(res, null, 1));
+  return res;
+}
+
+document.getElementById('run1').onclick = async () => { window.__r1 = await run(1); };
+document.getElementById('run2').onclick = async () => { window.__r2 = await run(2); };
+document.getElementById('run3').onclick = async () => { window.__r3 = await seekTest(); };
+</script>
+</body>
+</html>
