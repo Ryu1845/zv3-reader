@@ -2,7 +2,8 @@
 // - local: the ZONOS3 in-browser server (servers/web, WebGPU) vendored into vendor/zonos3/, with its model files in
 //   models/ (see scripts/vendor-zonos3.sh). Nothing is sent anywhere.
 // - server: a ZONOS3 HTTP server (MLX, ggml or sgl) at a URL.
-// Voices are the engine's built-in speakers, used through their embeddings (speaker_mode: 'embedding').
+// Voices are the engine's built-in speakers, used through their embeddings (speaker_mode: 'embedding'). Audio comes from
+// the full-size codec decoder (full_mr) when the engine serves it, else from its default (the pruned keep2_plain).
 //
 // Jobs run one at a time in submission order. Each job's float32 stream is kept so the Engine can attach late and
 // still get every sample; once a job is done (and no reader is replaying it) it is kept only as a PCM16 WAV Blob.
@@ -15,6 +16,7 @@ const SAMPLES_PER_FRAME = SR / FRAME_HZ;
 const CONFIG_TTL_MS = 10 * 60 * 1000;
 const LIVE = 'zv3-job:live/';
 const WAV = 'zv3-job:wav/';
+const DECODER = 'full_mr';
 const SETUP_HINT = 'run scripts/vendor-zonos3.sh in the extension folder (it needs a ZONOS3-Mini checkout at ../ZONOS3; see the README), then reload the extension';
 
 // An error that ends the session instead of being retried part by part.
@@ -45,6 +47,7 @@ export class ZonosBackend {
     this.dead = null;            // set when the local GPU device is lost; needs a fresh offscreen document
     this.listeners = new Set();
     this._api = null;
+    this.decoder = null;         // the decoder id sent with each request (DECODER when served), set by api()
     this._voices = null;
     this._config = null;
     this._configAt = 0;
@@ -79,7 +82,13 @@ export class ZonosBackend {
 
   api() {
     if (this.dead) return Promise.reject(fatal(this.dead, {reload: true}));
-    return this._api ??= this.connect(this).catch(e => { this._api = null; throw e; });
+    return this._api ??= this.connect(this).then(async call => {
+      // Capabilities.decoders lists the decoders a request may pick; servers older than per-request decoders have none
+      // and refuse the field.
+      const caps = await call('/v2/capabilities').then(r => r.json()).catch(() => ({}));
+      this.decoder = caps.decoders?.some(d => d.id === DECODER) ? DECODER : null;
+      return call;
+    }).catch(e => { this._api = null; throw e; });
   }
 
   lose(message) {
@@ -127,9 +136,11 @@ export class ZonosBackend {
       if (signal.aborted) return;
       const res = await api('/v2/generate', {method: 'POST', signal, headers: {'content-type': 'application/json'}, body: JSON.stringify({
         text: job.text, language: job.language || 'en_us', speaker_mode: 'embedding',
-        ...(job.voice ? {speaker_embedding_id: job.voice} : {}), stream: true, format: 'pcm', max_tokens: job.maxFrames,
+        ...(job.voice ? {speaker_embedding_id: job.voice} : {}), ...(this.decoder ? {decoder: this.decoder} : {}),
+        stream: true, format: 'pcm', max_tokens: job.maxFrames,
       })});
       if (!res.ok || !res.body) throw new Error(errorDetail(await res.json().catch(() => ({})), res.status));
+      this.progress(null);       // the local engine loads the full decoder on the first request that picks it
       const reader = res.body.getReader();
       for (;;) {
         const {value, done} = await reader.read();
@@ -275,8 +286,11 @@ let hooks = null;   // the engine module is a singleton; its callbacks are regis
 
 async function defaultLoadEngine({modelsUrl, progress, lost}) {
   const mod = await import('../vendor/zonos3/engine.js');
-  if (!hooks) mod.engine.onFatal(m => hooks.lost(m));
-  hooks = {lost};
+  if (!hooks) {
+    mod.engine.onFatal(m => hooks.lost(m));
+    mod.engine.onEncoderProgress(p => hooks.progress(p));   // models loaded after init (the full decoder)
+  }
+  hooks = {lost, progress};
   await mod.engine.init(progress, {base: modelsUrl, cache: false});
   return mod;
 }

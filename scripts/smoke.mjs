@@ -13,7 +13,8 @@ const at = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const cfg = await b.config();
-console.log(`[${at()}] config: ${cfg.voices.length} voices, default ${cfg.default_voice}`);
+await b.api();
+console.log(`[${at()}] config: ${cfg.voices.length} voices, default ${cfg.default_voice}, decoder ${b.decoder || 'server default'}`);
 
 const text = 'This is a short test of the ZV3 Reader extension. It should come back as streamed audio.';
 const [chunk] = buildChunks([{sents: splitSentences(text, 'en_us').map(s => ({text: text.slice(s.start, s.end)}))}], {lang: 'en_us', ramp: [60]});

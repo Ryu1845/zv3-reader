@@ -8,8 +8,9 @@ Audio streams in live; the sentence being read is highlighted and kept in view. 
 - **Server**: a ZONOS3 HTTP server (MLX, ggml or CUDA), by default `http://127.0.0.1:1919`, e.g. ZONOS3-Mini's
   `servers/mlx/scripts/serve.sh` on Apple silicon.
 
-Both engines speak the ZONOS3 v2 API (`POST /v2/generate`, streamed float32 PCM) and use their built-in voices through
-speaker embeddings. The reader supports all 22 ZONOS3 languages.
+Both engines speak the ZONOS3 v2 API (`POST /v2/generate`, streamed float32 PCM), use their built-in voices through
+speaker embeddings, and decode with the full-size codec decoder (`full_mr`) when they serve it. The reader supports all
+22 ZONOS3 languages.
 
 ## Install
 
@@ -17,7 +18,7 @@ Needs a Chromium browser (123 or later) with WebGPU for the local engine, plus N
 (`hf`) to set it up.
 
 1. For the local engine, check out ZONOS3-Mini next to this folder, then build its engine and copy its models in
-   (about 1.6 GB):
+   (about 2.6 GB):
    ```bash
    git clone https://github.com/Zyphra/ZONOS3-Mini.git ../ZONOS3
    pnpm --dir ../ZONOS3 install
@@ -92,9 +93,11 @@ sw.js (stateless) ── injects ──► content script (page): extract → se
 - **Backend adapter** (`backend/`): everything above it talks about "jobs" (`config`, `synthesize`, `status`,
   `liveUrl`, `wavUrl`, `previewUrl`, `fetch`, `cancel`); `getBackend` returns the local or the server backend.
   - `ZonosBackend` (`backend/zonos.js`) runs jobs one at a time through a v2 API function: `POST /v2/generate` with
-    `speaker_mode: 'embedding'`, `stream: true`, `format: 'pcm'`. Each job's stream is kept so a late reader still
-    gets every sample, then compacted to a WAV Blob. Its `zv3-job:` live and WAV URLs are served by its own `fetch`.
-    Jobs are cancelled when a voice switch or stop makes them useless.
+    `speaker_mode: 'embedding'`, `stream: true`, `format: 'pcm'`, and `decoder: 'full_mr'` when the engine lists the
+    full-size codec decoder in `GET /v2/capabilities` (`decoders`); otherwise the engine's default decoder (the pruned
+    `keep2_plain`) is used. Each job's stream is kept so a late reader still gets every sample, then compacted to a WAV
+    Blob. Its `zv3-job:` live and WAV URLs are served by its own `fetch`. Jobs are cancelled when a voice switch or
+    stop makes them useless.
   - `localBackend` lists `models/voices/voices.json` and loads the vendored engine (`vendor/zonos3/engine.js`, which
     spawns its workers) the first time a part is generated; the API function is the engine's `localFetch`.
   - `serverBackend` lists `GET /v2/speakers` (after checking `GET /v2/capabilities` offers embeddings) and calls the
@@ -148,7 +151,10 @@ node scripts/smoke.mjs
 ## Known limitations
 
 - Local: the first read after the offscreen document starts loads the model onto the GPU (about 3 s on an
-  Apple-silicon Mac). The offscreen document closes after 10 idle minutes and frees that memory.
+  Apple-silicon Mac), and its first part loads the full decoder (about 3 s more). The offscreen document closes after
+  10 idle minutes and frees that memory.
+- The full decoder takes about twice the generation time of the engines' default one (on an M-series Mac, about 0.25×
+  realtime locally instead of 0.1×), for better audio.
 - Local: there is no text normalization (HTTP servers normalize when their normalizer is installed), so numbers and
   abbreviations can read less well.
 - Local: after a GPU device loss the session stops with an error; the next read starts a fresh engine.

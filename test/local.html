@@ -52,7 +52,8 @@ async function run() {
     const t0 = performance.now();
     await b.api();
     result.loadMs = Math.round(performance.now() - t0);
-    log(`engine ready in ${result.loadMs} ms`);
+    result.decoder = b.decoder;
+    log(`engine ready in ${result.loadMs} ms; decoder ${b.decoder || 'default'}`);
 
     result.builtin = await timeJob(b, cfg.default_voice, TEXT);
     log('built-in voice:', JSON.stringify(result.builtin));

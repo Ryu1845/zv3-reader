@@ -24,8 +24,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const wave = n => Float32Array.from({length: n}, (_, i) => Math.sin(i / 9) * 0.5);
 
 // Fake v2 API, served to the local engine as its localFetch and to the server backend as its fetch.
-// POST /v2/generate streams `samples` float32 samples in 4 chunks, 10 ms apart.
-function fakeApi({samples = 4000, fail = null, speakers = [], modes, generateError = null} = {}) {
+// POST /v2/generate streams `samples` float32 samples in 4 chunks, 10 ms apart. `decoders`: the Capabilities.decoders
+// ids (undefined = a server from before per-request decoders, which lists none).
+function fakeApi({samples = 4000, fail = null, speakers = [], modes, generateError = null, decoders} = {}) {
   const calls = [];
   let active = 0, maxActive = 0;
   let loads = 0;
@@ -33,7 +34,9 @@ function fakeApi({samples = 4000, fail = null, speakers = [], modes, generateErr
     const method = init.method || 'GET';
     const body = init.body ? JSON.parse(init.body) : null;
     calls.push({method, path, body});
-    if (method === 'GET' && path === '/v2/capabilities') return Response.json({speaker_modes: modes ?? ['reference', 'embedding']});
+    if (method === 'GET' && path === '/v2/capabilities') {
+      return Response.json({speaker_modes: modes ?? ['reference', 'embedding'], ...(decoders ? {decoders: decoders.map(id => ({id}))} : {})});
+    }
     if (method === 'GET' && path === '/v2/speakers') return Response.json({speakers});
     if (method !== 'POST' || path !== '/v2/generate') return Response.json({detail: 'Not Found'}, {status: 404});
     if (generateError) return Response.json(generateError.body, {status: generateError.status});
@@ -141,6 +144,16 @@ test('a local job streams, a late live reader gets every sample, and the WAV mat
   assert.equal(wav.data.length, 4001);
   assert.deepEqual(api.generates(), [{text: 'Hello.', language: 'en_us', speaker_mode: 'embedding',
     speaker_embedding_id: 'default_b', stream: true, format: 'pcm', max_tokens: 150}]);
+});
+
+test('jobs ask for the full decoder when the engine serves it, and send no decoder otherwise', async () => {
+  for (const [decoders, want] of [[['keep2_plain', 'full_mr'], 'full_mr'], [['keep2_plain'], undefined], [undefined, undefined]]) {
+    const api = fakeApi({samples: 1000, decoders});
+    const b = server(api);
+    const {jobId} = await b.synthesize({text: 'Hi.', voice: 'v', maxSeconds: 10});
+    await until(b, jobId, ['done']);
+    assert.equal(api.generates()[0].decoder, want, `decoders ${decoders}`);
+  }
 });
 
 test('a reader that arrives after the job was compacted gets the WAV replayed as float32', async () => {
