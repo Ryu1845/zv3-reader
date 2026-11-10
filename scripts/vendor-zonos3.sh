@@ -37,7 +37,7 @@ mkdir -p "$EXT/vendor/zonos3" "$EXT/models"
 rsync -a --delete "$WEB/dist/" "$EXT/vendor/zonos3/"
 filters=()
 for d in "${DIRS[@]}"; do filters+=(--include="/$d/***"); done
-# -L: the Hugging Face cache links its files to blobs. --delete as well: macOS's rsync doesn't always take it as implied
-# by --delete-excluded, which left an old export's shards behind.
+# -L: the Hugging Face cache links its files to blobs. --delete as well: with only --delete-excluded, re-runs here left a
+# previous export's shards inside the copied directories.
 rsync -aL --delete --delete-excluded "${filters[@]}" --exclude='*' "$src/" "$EXT/models/"
 du -sh "$EXT/vendor/zonos3" "$EXT/models"
